@@ -1,3 +1,4 @@
 實價登錄/raw_data
 台灣股市/raw_data
 web_crawler/drivers
+web_crawler/*.log
