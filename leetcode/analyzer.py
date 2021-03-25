@@ -1,8 +1,13 @@
 from __future__ import print_function
 
 from urllib import request
+from datetime import date
+from pytablewriter import MarkdownTableWriter
+from pytablewriter.style import Style
 
 import os, json, argparse
+import pandas
+
 
 LEETCODE_API = {
   'tags': 'https://leetcode.com/problems/api/tags',
@@ -29,14 +34,6 @@ def download(to, override=True):
       with open(file_path, 'w') as file:
         file.write(content.read().decode('utf8'))
 
-def similarity_tree_insert(root, qid, topics):
-  if len(topics) == 0:
-    root['questions'].add(qid)
-  else:
-    if not topics[0] in root['topics']:
-      root['topics'][topics[0]] = {'topics': {}, 'questions': set()}
-    similarity_tree_insert(root['topics'][topics[0]], qid, topics[1:])
-
 def load(directory):
   data = {}
   for name, _ in LEETCODE_API.items():
@@ -47,7 +44,6 @@ def load(directory):
   for topic in data['tags']['topics']:
     topic['questions'] = set(topic['questions'])
   questions = {}
-  similarity_tree = {'topics': {}}
   for q in data['all']['stat_status_pairs']:
     qid = q['stat']['frontend_question_id']
     releated_topics = filter(lambda t: qid in t['questions'], data['tags']['topics'])
@@ -59,19 +55,177 @@ def load(directory):
         'title_slug': q['stat']['question__title_slug'],
         'accepted': q['stat']['total_acs'],
         'submissions': q['stat']['total_submitted'],
+        'acceptance': 100. * q['stat']['total_acs'] / q['stat']['total_submitted'],
         'level': q['difficulty']['level'],
-        'topics': releated_topics
+        'topics': releated_topics,
+        'topics_str': ';'.join(releated_topics)
       }
-      if not releated_topics[0] in similarity_tree['topics']:
-        similarity_tree['topics'][releated_topics[0]] = {'topics': {}, 'questions': set()}
-      similarity_tree_insert(similarity_tree['topics'][releated_topics[0]], qid, releated_topics[1:])
-  topics = {}
-  return topics, questions, similarity_tree
+  topics = data['tags']['topics']
+  for t in topics:
+    t['questions'] = set(filter(lambda qid: qid in questions.keys(), t['questions']))
+    t['difficulty'] = {}
+    t['difficulty']['easy'] = set(filter(lambda qid: questions[qid]['level'] == 1, t['questions']))
+    t['difficulty']['medium'] = set(filter(lambda qid: questions[qid]['level'] == 2, t['questions']))
+    t['difficulty']['hard'] = set(filter(lambda qid: questions[qid]['level'] == 3, t['questions']))
+    # group the similar questions
+    t['similarities'] = {}
+    topic_groups = {
+      questions[qid]['topics_str']: questions[qid]['topics'] for qid in t['questions']}
+    for name, group in topic_groups.items():
+      _topics = set(filter(lambda topic_name: topic_name != t['slug'], group))
+      if len(_topics) > 1:
+        t['similarities'][name] = {
+          'questions': set(filter(lambda qid: questions[qid]['topics_str'] == name, t['questions'])),
+          'topics': _topics
+        }
+  return topics, questions
 
-def dump(root, hierarchy=0):
-  for name, topic in root['topics'].items():
-    print('{}{}: {}'.format(' ' * (hierarchy * 3), name, len(topic['questions'])))
-    dump(topic, hierarchy + 1)
+def generate_markdown(to, topics, questions):
+  timestamp = 'latest updated at {}'.format(date.today().strftime("%Y/%m/%d"))
+  # generate to questions.md
+  question_json = {
+    'Number': [],
+    'Title': [],
+    'Level': [],
+    'Accepted': [],
+    'Submissions': [],
+    'Acceptance': []
+  }
+  number = '{:,}'
+  acceptance = '{:.0f}%'
+  title = '[{}](https://leetcode.com/problems/{})'
+  easy = 0
+  medium = 0
+  hard = 0
+  for qid in sorted(questions.keys()):
+    q = questions[qid]
+    question_json['Number'].append(qid)
+    question_json['Title'].append(title.format(q['title'], q['title_slug']))
+    question_json['Level'].append(LEVELS[q['level']])
+    question_json['Accepted'].append(number.format(q['accepted']))
+    question_json['Submissions'].append(number.format(q['submissions']))
+    question_json['Acceptance'].append(acceptance.format(q['acceptance']))
+    if q['level'] == 1: easy += 1
+    if q['level'] == 2: medium += 1
+    if q['level'] == 3: hard += 1
+  questions_md = os.path.join(to, 'questions.md')
+  with open(questions_md, 'w') as md:
+    total = len(questions.keys())
+    md.write('# List of All Questions\n\n')
+    md.write('**Total Questions: {}, Easy: {}, Medium: {}, Hard: {}, {}.**\n\n'.format(
+      total,
+      easy,
+      medium,
+      hard,
+      timestamp))
+    table = pandas.DataFrame.from_dict(question_json)
+    writer = MarkdownTableWriter()
+    writer.from_dataframe(table)
+    writer.column_styles = [
+        Style(align="right"),
+        Style(align="left"),
+        Style(align="center"),
+        Style(align="right"),
+        Style(align="right"),
+        Style(align="right")
+    ]
+    md.write(writer.dumps())
+    md.write('\n\n')
+    print('Created {}.'.format(questions_md))
+  # generate to topics.md
+  name = '[{}]({}.md)'
+  topic_json = {
+    'Name': [],
+    'Total': [],
+    'Easy': [],
+    'Medium': [],
+    'Hard': []
+  }
+  for t in topics:
+    topic_json['Name'].append(name.format(t['name'], t['slug']))
+    topic_json['Total'].append(number.format(len(t['questions'])))
+    topic_json['Easy'].append(number.format(len(t['difficulty']['easy'])))
+    topic_json['Medium'].append(number.format(len(t['difficulty']['medium'])))
+    topic_json['Hard'].append(number.format(len(t['difficulty']['hard'])))
+  topics_md = os.path.join(to, 'topics.md')
+  with open(topics_md, 'w') as md:
+    md.write('# List of All Topics\n\n')
+    md.write('**Total Questions: {}, Easy: {}, Medium: {}, Hard: {}, {}.**\n\n'.format(
+      total,
+      easy,
+      medium,
+      hard,
+      timestamp))
+    table = pandas.DataFrame.from_dict(topic_json)
+    writer = MarkdownTableWriter()
+    writer.from_dataframe(table)
+    writer.column_styles = [
+        Style(align="left"),
+        Style(align="right"),
+        Style(align="right"),
+        Style(align="right"),
+        Style(align="right")
+    ]
+    md.write(writer.dumps())
+    md.write('\n\n')
+    print('Created {}.'.format(topics_md))
+  # generate to each of topics
+  for t in topics:
+    topic_name_md = os.path.join(to, t['slug'] + '.md')
+    with open(topic_name_md, 'w') as md:
+      total = len(t['questions'])
+      easy = 0
+      medium = 0
+      hard = 0
+      for qid in t['questions']:
+        if questions[qid]['level'] == 1: easy += 1
+        if questions[qid]['level'] == 2: medium += 1
+        if questions[qid]['level'] == 3: hard += 1
+      md.write('# List of All Questions in {}\n\n'.format(t['name']))
+      md.write('**Total Questions: {}, Easy: {}, Medium: {}, Hard: {}, {}.**\n\n'.format(
+        total,
+        easy,
+        medium,
+        hard,
+        timestamp))
+      for k in sorted(t['similarities'].keys()):
+        similarity_topics = sorted(t['similarities'][k]['topics'])
+        md.write('- [{}]({})\n'.format(', '.join(similarity_topics), '-'.join(similarity_topics)))
+      md.write('\n')
+      for k in sorted(t['similarities'].keys()):
+        question_json = {
+          'Number': [],
+          'Title': [],
+          'Level': [],
+          'Accepted': [],
+          'Submissions': [],
+          'Acceptance': []
+        }
+        similarity_topics = sorted(t['similarities'][k]['topics'])
+        similarity_questions = sorted(t['similarities'][k]['questions'])
+        for qid in similarity_questions:
+          q = questions[qid]
+          question_json['Number'].append(qid)
+          question_json['Title'].append(title.format(q['title'], q['title_slug']))
+          question_json['Level'].append(LEVELS[q['level']])
+          question_json['Accepted'].append(number.format(q['accepted']))
+          question_json['Submissions'].append(number.format(q['submissions']))
+          question_json['Acceptance'].append(acceptance.format(q['acceptance']))
+        md.write('## {}\n\n'.format(', '.join(similarity_topics)))
+        table = pandas.DataFrame.from_dict(question_json)
+        writer = MarkdownTableWriter()
+        writer.from_dataframe(table)
+        writer.column_styles = [
+            Style(align="right"),
+            Style(align="left"),
+            Style(align="center"),
+            Style(align="right"),
+            Style(align="right"),
+            Style(align="right")
+        ]
+        md.write(writer.dumps())
+        md.write('\n\n')
+      print('Created {}.'.format(topic_name_md))
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
@@ -81,14 +235,15 @@ if __name__ == '__main__':
   parser.add_argument('-u', '--update',
     action='store_true',
     help='Update the data from LeetCode.')
-  parser.add_argument('-t', '--type',
-    nargs='*',
-    choices=['md', 'csv', 'ods'],
-    help='That the type of output files that supports Markdown(md), Comma-Separated Values(csv), and Operational Data Store(ods).')
+  parser.add_argument('-m', '--markdown',
+    action='store_true',
+    help='Generate to Markdown files.')
   args = parser.parse_args()
   print(args)
   # download data from LeetCode if need
   download(args.output_dir, args.update)
   # load the data
-  topics, questions, similarity_tree = load(args.output_dir)
-  dump(similarity_tree)
+  topics, questions = load(args.output_dir)
+  # generate to Markdown if need
+  if args.markdown:
+    generate_markdown(args.output_dir, topics, questions)
